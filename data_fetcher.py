@@ -10,72 +10,86 @@ import json
 from pathlib import Path
 from datetime import datetime
 
-BASE_URL = "https://api.football-data.org/v4"
+ESPN_BASE = "https://site.api.espn.com/apis/site/v2/sports/soccer/fifa.world"
 DATA_DIR = Path("data")
 DATA_DIR.mkdir(exist_ok=True)
 
-# Free tier doesn't need a key for World Cup data, but add yours here for higher rate limits
-API_KEY = ""
-
-HEADERS = {"X-Auth-Token": API_KEY} if API_KEY else {}
-WC_2026_ID = 2000  # football-data.org competition ID for FIFA World Cup
-
-
-def _get(endpoint: str) -> dict:
-    resp = requests.get(f"{BASE_URL}/{endpoint}", headers=HEADERS, timeout=15)
-    resp.raise_for_status()
-    return resp.json()
-
 
 def fetch_matches(save: bool = True) -> pd.DataFrame:
-    """Fetch all World Cup 2026 matches (played and scheduled)."""
-    data = _get(f"competitions/{WC_2026_ID}/matches")
-    matches = data.get("matches", [])
+    """Fetch all available World Cup 2026 matches from ESPN (no API key needed)."""
+    from datetime import datetime, timedelta
 
     rows = []
-    for m in matches:
-        rows.append({
-            "match_id":       m["id"],
-            "date":           m["utcDate"][:10],
-            "stage":          m["stage"],
-            "group":          m.get("group", ""),
-            "home_team":      m["homeTeam"]["name"],
-            "away_team":      m["awayTeam"]["name"],
-            "home_goals":     m["score"]["fullTime"]["home"],
-            "away_goals":     m["score"]["fullTime"]["away"],
-            "status":         m["status"],
-        })
+    seen = set()
 
-    df = pd.DataFrame(rows)
-    if save:
-        df.to_csv(DATA_DIR / "matches.csv", index=False)
-        print(f"Saved {len(df)} matches to data/matches.csv")
-    return df
+    # Scan from tournament start through end of group stage
+    start = datetime(2026, 6, 11)
+    for i in range(30):
+        dt = (start + timedelta(days=i)).strftime("%Y%m%d")
+        try:
+            resp = requests.get(f"{ESPN_BASE}/scoreboard?dates={dt}", timeout=10)
+            events = resp.json().get("events", [])
+        except Exception:
+            continue
 
+        for e in events:
+            if e["id"] in seen:
+                continue
+            seen.add(e["id"])
+            comp = e["competitions"][0]
+            competitors = {c.get("homeAway", ""): c for c in comp.get("competitors", [])}
+            home = competitors.get("home", {})
+            away = competitors.get("away", {})
+            status_type = comp["status"]["type"]
 
-def fetch_standings(save: bool = True) -> pd.DataFrame:
-    """Fetch current group stage standings."""
-    data = _get(f"competitions/{WC_2026_ID}/standings")
-    rows = []
-    for standing in data.get("standings", []):
-        group = standing.get("group", "")
-        for entry in standing.get("table", []):
-            team = entry["team"]["name"]
             rows.append({
-                "group":       group,
-                "team":        team,
-                "played":      entry["playedGames"],
-                "won":         entry["won"],
-                "drawn":       entry["draw"],
-                "lost":        entry["lost"],
-                "goals_for":   entry["goalsFor"],
-                "goals_against": entry["goalsAgainst"],
-                "goal_diff":   entry["goalDifference"],
-                "points":      entry["points"],
+                "match_id":   e["id"],
+                "date":       e["date"][:10],
+                "stage":      e.get("season", {}).get("slug", ""),
+                "home_team":  home.get("team", {}).get("displayName", ""),
+                "away_team":  away.get("team", {}).get("displayName", ""),
+                "home_goals": int(home.get("score", 0)) if status_type.get("completed") else None,
+                "away_goals": int(away.get("score", 0)) if status_type.get("completed") else None,
+                "status":     "FINISHED" if status_type.get("completed") else status_type.get("name", "SCHEDULED"),
             })
 
     df = pd.DataFrame(rows)
     if save:
+        DATA_DIR.mkdir(exist_ok=True)
+        df.to_csv(DATA_DIR / "matches.csv", index=False)
+        print(f"Saved {len(df)} matches ({(df['status']=='FINISHED').sum()} completed)")
+    return df
+
+
+def fetch_standings(save: bool = True) -> pd.DataFrame:
+    """Fetch current group stage standings from ESPN."""
+    try:
+        resp = requests.get(f"{ESPN_BASE}/standings", timeout=10)
+        data = resp.json()
+    except Exception as e:
+        print(f"  Could not fetch standings: {e}")
+        return pd.DataFrame()
+
+    rows = []
+    for group in data.get("standings", []):
+        group_name = group.get("name", "")
+        for entry in group.get("standings", {}).get("entries", []):
+            team = entry.get("team", {}).get("displayName", "")
+            stats = {s["name"]: s["value"] for s in entry.get("stats", [])}
+            rows.append({
+                "group":         group_name,
+                "team":          team,
+                "played":        int(stats.get("gamesPlayed", 0)),
+                "won":           int(stats.get("wins", 0)),
+                "drawn":         int(stats.get("ties", 0)),
+                "lost":          int(stats.get("losses", 0)),
+                "goals_for":     int(stats.get("pointsFor", 0)),
+                "goals_against": int(stats.get("pointsAgainst", 0)),
+                "points":        int(stats.get("points", 0)),
+            })
+
+    df = pd.DataFrame(rows)
+    if save and not df.empty:
         df.to_csv(DATA_DIR / "standings.csv", index=False)
         print(f"Saved standings for {len(df)} teams")
     return df

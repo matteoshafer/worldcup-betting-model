@@ -11,6 +11,54 @@ from scipy.optimize import minimize
 from typing import Tuple
 
 
+def _elo_predict(home: str, away: str, league_avg_goals: float = 1.35) -> dict:
+    """
+    Pure Elo-based prediction when tournament match data is unavailable.
+    Uses Poisson distribution parameterised by Elo-derived expected goals.
+    """
+    from team_ratings import ELO_RATINGS
+    home_elo = ELO_RATINGS.get(home, 1650)
+    away_elo = ELO_RATINGS.get(away, 1650)
+    avg_elo  = 1750
+
+    # Scale Elo to expected goals: stronger team scores more, concedes less
+    mu = league_avg_goals * np.exp((home_elo - avg_elo) / 600 - (away_elo - avg_elo) / 800)
+    nu = league_avg_goals * np.exp((away_elo - avg_elo) / 600 - (home_elo - avg_elo) / 800)
+    mu = max(0.3, min(4.0, mu))
+    nu = max(0.3, min(4.0, nu))
+
+    max_g = 8
+    matrix = np.outer(
+        poisson.pmf(range(max_g + 1), mu),
+        poisson.pmf(range(max_g + 1), nu),
+    )
+    # Dixon-Coles low-score correction (rho=-0.1 as neutral prior)
+    for i in range(2):
+        for j in range(2):
+            matrix[i, j] *= _dc_rho(i, j, mu, nu, -0.1)
+    matrix /= matrix.sum()
+
+    home_win = float(np.tril(matrix, -1).sum())
+    draw     = float(np.trace(matrix))
+    away_win = float(np.triu(matrix, 1).sum())
+
+    total = np.array([[i + j for j in range(max_g + 1)] for i in range(max_g + 1)])
+    return {
+        "home_team":           home,
+        "away_team":           away,
+        "home_win":            round(home_win, 4),
+        "draw":                round(draw, 4),
+        "away_win":            round(away_win, 4),
+        "over_1_5":            round(float(matrix[total > 1.5].sum()), 4),
+        "over_2_5":            round(float(matrix[total > 2.5].sum()), 4),
+        "over_3_5":            round(float(matrix[total > 3.5].sum()), 4),
+        "btts":                round(float(matrix[1:, 1:].sum()), 4),
+        "expected_home_goals": round(mu, 3),
+        "expected_away_goals": round(nu, 3),
+        "source":              "Elo prior (limited tournament data)",
+    }
+
+
 def _dc_rho(x: int, y: int, mu: float, nu: float, rho: float) -> float:
     """Dixon-Coles low-score correction factor."""
     if x == 0 and y == 0:
@@ -63,14 +111,18 @@ class DixonColesModel:
         self.fitted = False
 
     def fit(self, matches: pd.DataFrame):
-        """Fit the model on completed matches."""
+        """Fit the model on completed matches. Falls back to Elo priors for unseen teams."""
+        from team_ratings import get_team_params, ELO_RATINGS
+        self._elo_fallback = True
+
         completed = matches[matches["status"] == "FINISHED"].copy()
         if len(completed) < 5:
-            print("  Warning: fewer than 5 completed matches — model may be unreliable")
+            print("  Warning: fewer than 5 completed matches — using Elo priors for unseen teams")
 
         self.teams = sorted(
             set(completed["home_team"].tolist() + completed["away_team"].tolist())
         )
+        self._fitted_from_data = set(self.teams)
         n = len(self.teams)
 
         # Initial params: attack=0, defence=0, home_adv=0.1, rho=-0.1
@@ -93,6 +145,24 @@ class DixonColesModel:
         self.rho      = params[2 * n + 1]
         self.fitted = True
         print(f"  Model fitted on {len(completed)} matches, {n} teams")
+
+        # Add Elo-based params for any team not in completed matches.
+        # Scale Elo deltas to match the fitted model's parameter space.
+        from team_ratings import get_team_params, ELO_RATINGS
+        if self.attack:
+            fitted_atk_mean = np.mean(list(self.attack.values()))
+            fitted_atk_std  = max(np.std(list(self.attack.values())), 0.01)
+        else:
+            fitted_atk_mean, fitted_atk_std = 0.0, 0.3
+
+        for team in ELO_RATINGS:
+            if team not in self.attack:
+                raw_atk, raw_dfc = get_team_params(team)
+                # Scale to match fitted distribution
+                self.attack[team]  = fitted_atk_mean + raw_atk * fitted_atk_std / 0.3
+                self.defence[team] = -raw_dfc * fitted_atk_std / 0.3
+                if team not in self.teams:
+                    self.teams.append(team)
 
     def _expected_goals(self, home: str, away: str) -> Tuple[float, float]:
         """Expected goals (lambda) for each team."""
@@ -126,6 +196,11 @@ class DixonColesModel:
         """
         if not self.fitted:
             raise RuntimeError("Model not fitted. Call fit() first.")
+
+        # If either team wasn't seen in completed matches, use pure Elo prediction
+        fitted_from_data = getattr(self, '_fitted_from_data', set())
+        if home not in fitted_from_data or away not in fitted_from_data:
+            return _elo_predict(home, away)
 
         for team, label in [(home, "home"), (away, "away")]:
             if team not in self.teams:
