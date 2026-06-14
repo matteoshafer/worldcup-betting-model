@@ -72,28 +72,43 @@ def _dc_rho(x: int, y: int, mu: float, nu: float, rho: float) -> float:
     return 1.0
 
 
-def _log_likelihood(params: np.ndarray, matches: pd.DataFrame, teams: list) -> float:
-    """Negative log-likelihood for Dixon-Coles model."""
+def _log_likelihood(params: np.ndarray, matches: pd.DataFrame, teams: list,
+                    weights: np.ndarray = None) -> float:
+    """Negative log-likelihood for Dixon-Coles model with optional time-decay weights."""
     n = len(teams)
-    attack  = dict(zip(teams, params[:n]))
-    defence = dict(zip(teams, params[n:2*n]))
+    attack   = dict(zip(teams, params[:n]))
+    defence  = dict(zip(teams, params[n:2*n]))
     home_adv = params[2*n]
     rho      = params[2*n + 1]
 
+    if weights is None:
+        weights = np.ones(len(matches))
+
     ll = 0.0
-    for _, row in matches.iterrows():
+    for i, (_, row) in enumerate(matches.iterrows()):
         ht, at = row["home_team"], row["away_team"]
         hg, ag = int(row["home_goals"]), int(row["away_goals"])
 
         mu = np.exp(attack[ht] + defence[at] + home_adv)
         nu = np.exp(attack[at] + defence[ht])
 
-        ll += (
+        ll += weights[i] * (
             np.log(poisson.pmf(hg, mu) + 1e-10)
             + np.log(poisson.pmf(ag, nu) + 1e-10)
             + np.log(_dc_rho(hg, ag, mu, nu, rho) + 1e-10)
         )
     return -ll
+
+
+def _time_decay_weights(dates: pd.Series, half_life_days: int = 120) -> np.ndarray:
+    """
+    Exponential time decay: recent matches weight 1.0, older ones decay.
+    WC matches always get weight 2.0 (double) — most relevant signal.
+    """
+    today = pd.Timestamp.today()
+    days_ago = (today - pd.to_datetime(dates)).dt.days.clip(lower=0).values
+    decay = np.exp(-np.log(2) * days_ago / half_life_days)
+    return decay
 
 
 class DixonColesModel:
@@ -110,12 +125,36 @@ class DixonColesModel:
         self.rho = 0.0
         self.fitted = False
 
-    def fit(self, matches: pd.DataFrame):
-        """Fit the model on completed matches. Falls back to Elo priors for unseen teams."""
+    def fit(self, matches: pd.DataFrame, historical: pd.DataFrame = None):
+        """
+        Fit the model on completed matches + optional historical competitive data.
+        Historical matches are time-decay weighted; WC matches get double weight.
+        Falls back to Elo priors for teams with no data at all.
+        """
         from team_ratings import get_team_params, ELO_RATINGS
         self._elo_fallback = True
 
-        completed = matches[matches["status"] == "FINISHED"].copy()
+        wc_completed = matches[matches["status"] == "FINISHED"].copy()
+
+        if historical is not None and not historical.empty:
+            hist_completed = historical[historical["status"] == "FINISHED"].copy()
+            # Keep matches where at least one team is a known WC/Elo team
+            known_teams = set(ELO_RATINGS.keys()) | set(wc_completed["home_team"]) | set(wc_completed["away_team"])
+            hist_completed = hist_completed[
+                hist_completed["home_team"].isin(known_teams) |
+                hist_completed["away_team"].isin(known_teams)
+            ].copy()
+
+            # Combine — WC matches get 2× weight via duplication, handled in weights below
+            wc_completed["_source"] = "wc"
+            hist_completed["_source"] = "historical"
+            completed = pd.concat([wc_completed, hist_completed], ignore_index=True)
+            print(f"  Training on {len(wc_completed)} WC matches + {len(hist_completed)} historical matches")
+        else:
+            wc_completed["_source"] = "wc"
+            completed = wc_completed.copy()
+            print(f"  Training on {len(completed)} WC matches only")
+
         if len(completed) < 5:
             print("  Warning: fewer than 5 completed matches — using Elo priors for unseen teams")
 
@@ -125,26 +164,30 @@ class DixonColesModel:
         self._fitted_from_data = set(self.teams)
         n = len(self.teams)
 
+        # Time-decay weights — WC matches get 2× boost as most relevant signal
+        weights = _time_decay_weights(completed["date"])
+        weights[completed["_source"].values == "wc"] *= 2.0
+
         # Initial params: attack=0, defence=0, home_adv=0.1, rho=-0.1
         x0 = np.zeros(2 * n + 2)
-        x0[2 * n]     = 0.1   # home advantage
-        x0[2 * n + 1] = -0.1  # rho
+        x0[2 * n]     = 0.1
+        x0[2 * n + 1] = -0.1
 
         result = minimize(
             _log_likelihood,
             x0,
-            args=(completed, self.teams),
+            args=(completed, self.teams, weights),
             method="L-BFGS-B",
-            options={"maxiter": 200},
+            options={"maxiter": 500},
         )
 
         params = result.x
-        self.attack  = dict(zip(self.teams, params[:n]))
-        self.defence = dict(zip(self.teams, params[n:2*n]))
+        self.attack   = dict(zip(self.teams, params[:n]))
+        self.defence  = dict(zip(self.teams, params[n:2*n]))
         self.home_adv = params[2 * n]
         self.rho      = params[2 * n + 1]
-        self.fitted = True
-        print(f"  Model fitted on {len(completed)} matches, {n} teams")
+        self.fitted   = True
+        print(f"  {n} teams fitted")
 
         # Add Elo-based params for any team not in completed matches.
         # Scale Elo deltas to match the fitted model's parameter space.

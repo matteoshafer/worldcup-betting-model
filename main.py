@@ -10,7 +10,8 @@ Usage:
 
 import argparse
 import pandas as pd
-from data_fetcher import load_matches, fetch_matches, fetch_standings, fetch_team_stats
+from data_fetcher import (load_matches, fetch_matches, fetch_standings, fetch_team_stats,
+                          load_historical_matches, fetch_historical_competitive_matches)
 from poisson_model import DixonColesModel
 from betting import find_value_bets, kelly_fraction
 
@@ -107,28 +108,39 @@ def main():
                         help="Run rolling backtest on completed matches")
     parser.add_argument("--refresh", action="store_true",
                         help="Re-fetch latest data from API")
+    parser.add_argument("--refresh-history", action="store_true",
+                        help="Re-fetch historical competitive match data")
     args = parser.parse_args()
 
     print("=" * 60)
     print("  WORLD CUP 2026 BETTING MODEL")
     print("=" * 60)
 
-    # Load or refresh data
+    # Load or refresh WC data
     if args.refresh:
-        print("\nFetching latest data...")
+        print("\nFetching latest World Cup data...")
         matches = fetch_matches()
         fetch_standings()
     else:
         matches = load_matches()
 
-    print(f"\nLoaded {len(matches)} matches "
+    print(f"\nLoaded {len(matches)} WC matches "
           f"({(matches['status'] == 'FINISHED').sum()} completed, "
           f"{(matches['status'].isin(['SCHEDULED','TIMED'])).sum()} upcoming)")
+
+    # Load or refresh historical competitive data
+    if args.refresh_history:
+        print("\nFetching historical competitive matches (this may take ~30s)...")
+        historical = fetch_historical_competitive_matches()
+    else:
+        historical = load_historical_matches()
+        if not historical.empty:
+            print(f"Loaded {len(historical)} historical competitive matches")
 
     # Fit model
     print("\nFitting Dixon-Coles model...")
     model = DixonColesModel()
-    model.fit(matches)
+    model.fit(matches, historical=historical if not historical.empty else None)
 
     if args.backtest:
         backtest(matches, model)

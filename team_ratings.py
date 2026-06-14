@@ -46,11 +46,32 @@ ELO_RATINGS = {
     "Ecuador":             1690,
     "Czechia":             1740,
     "Bosnia-Herzegovina":  1680,
+    # Group I / Other WC teams
+    "Türkiye":             1760,
+    "Hungary":             1700,
+    "Romania":             1690,
+    "Norway":              1730,
+    "Iran":                1680,
+    "New Zealand":         1540,
+    "Iraq":                1620,
+    "Sweden":              1750,
+    "Tunisia":             1650,
+    "Algeria":             1670,
+    "Jordan":              1580,
+    "Austria":             1770,
+    "Venezuela":           1640,
+    "Indonesia":           1530,
+    "United Arab Emirates": 1580,
     # Other teams
     "Paraguay":            1640,
     "South Africa":        1580,
     "Haiti":               1490,
     "Scotland":            1700,
+    "Curaçao":             1500,
+    "Cape Verde":          1610,
+    "Georgia":             1670,
+    "Slovenia":            1660,
+    "Slovakia":            1660,
 }
 
 
