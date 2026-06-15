@@ -13,29 +13,69 @@ import pandas as pd
 from data_fetcher import (load_matches, fetch_matches, fetch_standings, fetch_team_stats,
                           load_historical_matches, fetch_historical_competitive_matches)
 from poisson_model import DixonColesModel
-from betting import find_value_bets, kelly_fraction
+from betting import find_value_bets, kelly_fraction, value_edge
 
 
-def print_prediction(pred: dict):
+def _verdict(model_prob: float, book_odds: float) -> str:
+    """Return edge + Kelly stake verdict string for a market."""
+    edge = value_edge(model_prob, book_odds)
+    kelly = kelly_fraction(model_prob, book_odds)
+    if edge >= 0.04:
+        return f"  +{edge:.1%} edge  ✅ BET  ({kelly*100:.1f}% Kelly)"
+    elif edge >= 0.02:
+        return f"  +{edge:.1%} edge  ⚠️  MARGINAL"
+    else:
+        return f"  {edge:+.1%} edge  ❌ No value"
+
+
+def print_prediction(pred: dict, book_odds: dict = None):
+    """
+    Print match prediction with optional bookmaker value analysis.
+
+    book_odds keys: home_win, draw, away_win, over_1_5, over_2_5, over_3_5, btts
+    Values are decimal odds (e.g. 1.85, 3.40, 4.50).
+    """
     home, away = pred["home_team"], pred["away_team"]
     hs, as_ = pred["expected_home_goals"], pred["expected_away_goals"]
+    W = 65 if book_odds else 55
 
-    print(f"\n{'='*55}")
+    print(f"\n{'='*W}")
     print(f"  {home}  vs  {away}")
     print(f"  Expected: {hs:.2f} - {as_:.2f}")
-    print(f"{'='*55}")
-    print(f"  {'Match Result':30} {'Prob':>8}  {'Fair Odds':>10}")
-    print(f"  {'-'*50}")
-    print(f"  {'Home Win (' + home + ')':30} {pred['home_win']:>7.1%}  {1/pred['home_win']:>9.2f}")
-    print(f"  {'Draw':30} {pred['draw']:>7.1%}  {1/pred['draw']:>9.2f}")
-    print(f"  {'Away Win (' + away + ')':30} {pred['away_win']:>7.1%}  {1/pred['away_win']:>9.2f}")
-    print(f"\n  {'Goals Markets':30} {'Prob':>8}  {'Fair Odds':>10}")
-    print(f"  {'-'*50}")
-    print(f"  {'Over 1.5':30} {pred['over_1_5']:>7.1%}  {1/pred['over_1_5']:>9.2f}")
-    print(f"  {'Over 2.5':30} {pred['over_2_5']:>7.1%}  {1/pred['over_2_5']:>9.2f}")
-    print(f"  {'Over 3.5':30} {pred['over_3_5']:>7.1%}  {1/pred['over_3_5']:>9.2f}")
-    print(f"  {'Both Teams to Score':30} {pred['btts']:>7.1%}  {1/pred['btts']:>9.2f}")
-    print(f"{'='*55}")
+    if book_odds:
+        print(f"  [Bookmaker odds supplied — value analysis shown]")
+    print(f"{'='*W}")
+
+    markets = [
+        ("Match Result", None, None),
+        (f"Home Win ({home})", "home_win", pred["home_win"]),
+        ("Draw",               "draw",     pred["draw"]),
+        (f"Away Win ({away})", "away_win", pred["away_win"]),
+        (None, None, None),
+        ("Goals Markets", None, None),
+        ("Over 1.5",           "over_1_5", pred["over_1_5"]),
+        ("Over 2.5",           "over_2_5", pred["over_2_5"]),
+        ("Over 3.5",           "over_3_5", pred["over_3_5"]),
+        ("Both Teams to Score","btts",     pred["btts"]),
+    ]
+
+    for label, key, prob in markets:
+        if label is None:
+            print()
+            continue
+        if prob is None:
+            print(f"  {label}")
+            print(f"  {'-'*(W-4)}")
+            continue
+
+        fair = 1 / prob
+        line = f"  {label:32} {prob:>7.1%}   {fair:>8.2f}"
+        if book_odds and key in book_odds:
+            bo = book_odds[key]
+            line += f"   {bo:>8.2f}{_verdict(prob, bo)}"
+        print(line)
+
+    print(f"{'='*W}")
 
 
 def backtest(matches: pd.DataFrame, model: DixonColesModel) -> dict:
@@ -86,7 +126,7 @@ def backtest(matches: pd.DataFrame, model: DixonColesModel) -> dict:
 
 def predict_upcoming(matches: pd.DataFrame, model: DixonColesModel):
     """Print predictions for all scheduled (not yet played) matches."""
-    upcoming = matches[matches["status"].isin(["SCHEDULED", "TIMED"])].copy()
+    upcoming = matches[matches["status"].isin(["SCHEDULED", "TIMED", "STATUS_SCHEDULED", "STATUS_TIMED"])].copy()
     if upcoming.empty:
         print("No upcoming matches found.")
         return
@@ -110,6 +150,12 @@ def main():
                         help="Re-fetch latest data from API")
     parser.add_argument("--refresh-history", action="store_true",
                         help="Re-fetch historical competitive match data")
+    parser.add_argument("--odds", nargs=3, metavar=("HOME", "DRAW", "AWAY"),
+                        type=float, help="Bookmaker decimal odds: home draw away")
+    parser.add_argument("--over15",  type=float, metavar="ODDS", help="Book odds for Over 1.5")
+    parser.add_argument("--over25",  type=float, metavar="ODDS", help="Book odds for Over 2.5")
+    parser.add_argument("--over35",  type=float, metavar="ODDS", help="Book odds for Over 3.5")
+    parser.add_argument("--btts",    type=float, metavar="ODDS", help="Book odds for Both Teams to Score")
     args = parser.parse_args()
 
     print("=" * 60)
@@ -126,7 +172,7 @@ def main():
 
     print(f"\nLoaded {len(matches)} WC matches "
           f"({(matches['status'] == 'FINISHED').sum()} completed, "
-          f"{(matches['status'].isin(['SCHEDULED','TIMED'])).sum()} upcoming)")
+          f"{(matches['status'].isin(['SCHEDULED','TIMED','STATUS_SCHEDULED','STATUS_TIMED'])).sum()} upcoming)")
 
     # Load or refresh historical competitive data
     if args.refresh_history:
@@ -142,13 +188,26 @@ def main():
     model = DixonColesModel()
     model.fit(matches, historical=historical if not historical.empty else None)
 
+    # Build book_odds dict from CLI flags
+    book_odds = None
+    if args.odds or args.over25 or args.over15 or args.over35 or args.btts:
+        book_odds = {}
+        if args.odds:
+            book_odds["home_win"] = args.odds[0]
+            book_odds["draw"]     = args.odds[1]
+            book_odds["away_win"] = args.odds[2]
+        if args.over15:  book_odds["over_1_5"] = args.over15
+        if args.over25:  book_odds["over_2_5"] = args.over25
+        if args.over35:  book_odds["over_3_5"] = args.over35
+        if args.btts:    book_odds["btts"]     = args.btts
+
     if args.backtest:
         backtest(matches, model)
     elif args.match:
         home, away = args.match
         try:
             pred = model.predict(home, away)
-            print_prediction(pred)
+            print_prediction(pred, book_odds=book_odds)
         except ValueError as e:
             print(f"\nError: {e}")
     else:

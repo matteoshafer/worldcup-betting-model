@@ -73,8 +73,16 @@ def _dc_rho(x: int, y: int, mu: float, nu: float, rho: float) -> float:
 
 
 def _log_likelihood(params: np.ndarray, matches: pd.DataFrame, teams: list,
-                    weights: np.ndarray = None) -> float:
-    """Negative log-likelihood for Dixon-Coles model with optional time-decay weights."""
+                    weights: np.ndarray = None,
+                    elo_priors: dict = None,
+                    reg_strength: float = 1.5) -> float:
+    """
+    Negative log-likelihood for Dixon-Coles model with time-decay weights
+    and L2 regularization toward Elo-derived priors.
+
+    reg_strength controls how strongly parameters are pulled toward Elo priors.
+    Higher = more Elo influence, less data-driven extremes.
+    """
     n = len(teams)
     attack   = dict(zip(teams, params[:n]))
     defence  = dict(zip(teams, params[n:2*n]))
@@ -89,14 +97,22 @@ def _log_likelihood(params: np.ndarray, matches: pd.DataFrame, teams: list,
         ht, at = row["home_team"], row["away_team"]
         hg, ag = int(row["home_goals"]), int(row["away_goals"])
 
-        mu = np.exp(attack[ht] + defence[at] + home_adv)
-        nu = np.exp(attack[at] + defence[ht])
+        mu = np.exp(np.clip(attack[ht] + defence[at] + home_adv, -4, 4))
+        nu = np.exp(np.clip(attack[at] + defence[ht], -4, 4))
 
         ll += weights[i] * (
             np.log(poisson.pmf(hg, mu) + 1e-10)
             + np.log(poisson.pmf(ag, nu) + 1e-10)
             + np.log(_dc_rho(hg, ag, mu, nu, rho) + 1e-10)
         )
+
+    # L2 regularization toward Elo priors — prevents extreme params from weak opponents
+    if elo_priors:
+        for i, team in enumerate(teams):
+            prior_atk, prior_def = elo_priors.get(team, (0.0, 0.0))
+            ll -= reg_strength * (params[i] - prior_atk) ** 2
+            ll -= reg_strength * (params[n + i] - prior_def) ** 2
+
     return -ll
 
 
@@ -168,15 +184,22 @@ class DixonColesModel:
         weights = _time_decay_weights(completed["date"])
         weights[completed["_source"].values == "wc"] *= 2.0
 
-        # Initial params: attack=0, defence=0, home_adv=0.1, rho=-0.1
+        # Elo priors for regularization — keeps teams with thin/unrepresentative data sane
+        elo_priors = {team: get_team_params(team) for team in self.teams}
+
+        # Initial params seeded from Elo priors so optimizer starts in a sensible place
         x0 = np.zeros(2 * n + 2)
-        x0[2 * n]     = 0.1
-        x0[2 * n + 1] = -0.1
+        for i, team in enumerate(self.teams):
+            prior_atk, prior_def = elo_priors.get(team, (0.0, 0.0))
+            x0[i]     = prior_atk
+            x0[n + i] = prior_def
+        x0[2 * n]     = 0.0   # no home advantage at neutral WC venues
+        x0[2 * n + 1] = -0.1  # rho
 
         result = minimize(
             _log_likelihood,
             x0,
-            args=(completed, self.teams, weights),
+            args=(completed, self.teams, weights, elo_priors, 1.5),
             method="L-BFGS-B",
             options={"maxiter": 500},
         )
