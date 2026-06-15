@@ -12,8 +12,14 @@ from datetime import datetime, timedelta
 
 ESPN_BASE = "https://site.api.espn.com/apis/site/v2/sports/soccer/fifa.world"
 ESPN_SOCCER = "https://site.api.espn.com/apis/site/v2/sports/soccer"
+ODDS_API_BASE = "https://api.the-odds-api.com/v4"
 DATA_DIR = Path("data")
 DATA_DIR.mkdir(exist_ok=True)
+
+# Set your Odds API key here or via env var ODDS_API_KEY
+# Free tier: 500 requests/month — sign up at https://the-odds-api.com
+import os
+ODDS_API_KEY = os.environ.get("ODDS_API_KEY", "")
 
 # Competitive national-team competitions to pull historical data from.
 # Friendlies are excluded by filtering competition type from the ESPN response.
@@ -251,6 +257,137 @@ def load_team_stats() -> pd.DataFrame:
         return pd.read_csv(path)
     matches = load_matches()
     return fetch_team_stats(matches)
+
+
+def fetch_live_odds(bookmakers: str = "draftkings,fanduel,betmgm,williamhill_us") -> list[dict]:
+    """
+    Fetch live World Cup odds from The Odds API.
+    Returns a list of match odds dicts ready for value bet analysis.
+
+    Requires ODDS_API_KEY env var or set it in this file.
+    Sign up free at https://the-odds-api.com (500 requests/month free tier).
+    """
+    if not ODDS_API_KEY:
+        raise ValueError(
+            "No Odds API key found. Set ODDS_API_KEY env var or add it to data_fetcher.py.\n"
+            "Sign up free at https://the-odds-api.com"
+        )
+
+    url = f"{ODDS_API_BASE}/sports/soccer_fifa_world_cup/odds/"
+    params = {
+        "apiKey":      ODDS_API_KEY,
+        "regions":     "us,uk,eu",
+        "markets":     "h2h,totals,btts",
+        "oddsFormat":  "decimal",
+        "bookmakers":  bookmakers,
+    }
+
+    resp = requests.get(url, params=params, timeout=10)
+    resp.raise_for_status()
+    remaining = resp.headers.get("x-requests-remaining", "?")
+    print(f"  Odds API: {remaining} requests remaining this month")
+
+    matches = []
+    for event in resp.json():
+        home_team = event["home_team"]
+        away_team = event["away_team"]
+        odds_dict = {"home_team": home_team, "away_team": away_team, "bookmaker_odds": {}}
+
+        for bm in event.get("bookmakers", []):
+            for market in bm.get("markets", []):
+                key = market["key"]
+                for outcome in market.get("outcomes", []):
+                    name = outcome["name"]
+                    price = outcome["price"]
+
+                    if key == "h2h":
+                        if name == home_team:
+                            odds_dict["bookmaker_odds"].setdefault("home_win", []).append(price)
+                        elif name == away_team:
+                            odds_dict["bookmaker_odds"].setdefault("away_win", []).append(price)
+                        else:
+                            odds_dict["bookmaker_odds"].setdefault("draw", []).append(price)
+                    elif key == "totals":
+                        point = outcome.get("point", 0)
+                        if abs(point - 2.5) < 0.01:
+                            if name == "Over":
+                                odds_dict["bookmaker_odds"].setdefault("over_2_5", []).append(price)
+                            else:
+                                odds_dict["bookmaker_odds"].setdefault("under_2_5", []).append(price)
+                    elif key == "btts":
+                        if name == "Yes":
+                            odds_dict["bookmaker_odds"].setdefault("btts", []).append(price)
+
+        # Use best available odds across bookmakers for each market
+        best = {}
+        for market, prices in odds_dict["bookmaker_odds"].items():
+            best[market] = round(max(prices), 3)
+        odds_dict["best_odds"] = best
+        matches.append(odds_dict)
+
+    return matches
+
+
+def print_value_analysis(predictions: list[dict], live_odds: list[dict]):
+    """
+    Match model predictions to live odds and print full value analysis.
+    """
+    from betting import value_edge, kelly_fraction
+
+    # Fuzzy match team names between model and odds API
+    def normalise(name: str) -> str:
+        return name.lower().replace("é", "e").replace("ü", "u").replace("ï", "i").strip()
+
+    odds_lookup = {
+        (normalise(o["home_team"]), normalise(o["away_team"])): o["best_odds"]
+        for o in live_odds
+    }
+
+    MARKETS = [
+        ("home_win",  "Home Win"),
+        ("draw",      "Draw"),
+        ("away_win",  "Away Win"),
+        ("over_2_5",  "Over 2.5"),
+        ("btts",      "Both Teams Score"),
+    ]
+
+    found_value = False
+    for pred in predictions:
+        home_key = normalise(pred["home_team"])
+        away_key = normalise(pred["away_team"])
+        book = odds_lookup.get((home_key, away_key))
+        if not book:
+            continue
+
+        print(f"\n{'='*70}")
+        print(f"  {pred['home_team']}  vs  {pred['away_team']}")
+        print(f"  Expected: {pred['expected_home_goals']:.2f} - {pred['expected_away_goals']:.2f}")
+        print(f"{'='*70}")
+        print(f"  {'Market':<22} {'Model':>7}  {'Fair':>7}  {'Book':>7}  {'Edge':>7}  Verdict")
+        print(f"  {'-'*64}")
+
+        for key, label in MARKETS:
+            model_p = pred.get(key)
+            book_o  = book.get(key)
+            if model_p is None or book_o is None:
+                continue
+
+            fair  = 1 / model_p
+            edge  = value_edge(model_p, book_o)
+            kelly = kelly_fraction(model_p, book_o)
+
+            if edge >= 0.04:
+                verdict = f"✅ BET  {kelly*100:.1f}% Kelly"
+                found_value = True
+            elif edge >= 0.02:
+                verdict = "⚠️  MARGINAL"
+            else:
+                verdict = "❌ No value"
+
+            print(f"  {label:<22} {model_p:>6.1%}  {fair:>7.2f}  {book_o:>7.2f}  {edge:>+6.1%}  {verdict}")
+
+    if not found_value:
+        print("\n  No clear value bets found across today's matches.")
 
 
 if __name__ == "__main__":

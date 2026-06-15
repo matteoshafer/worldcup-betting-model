@@ -11,7 +11,8 @@ Usage:
 import argparse
 import pandas as pd
 from data_fetcher import (load_matches, fetch_matches, fetch_standings, fetch_team_stats,
-                          load_historical_matches, fetch_historical_competitive_matches)
+                          load_historical_matches, fetch_historical_competitive_matches,
+                          fetch_live_odds, print_value_analysis)
 from poisson_model import DixonColesModel
 from betting import find_value_bets, kelly_fraction, value_edge
 
@@ -156,6 +157,8 @@ def main():
     parser.add_argument("--over25",  type=float, metavar="ODDS", help="Book odds for Over 2.5")
     parser.add_argument("--over35",  type=float, metavar="ODDS", help="Book odds for Over 3.5")
     parser.add_argument("--btts",    type=float, metavar="ODDS", help="Book odds for Both Teams to Score")
+    parser.add_argument("--live-odds", action="store_true",
+                        help="Fetch live odds from The Odds API and show value bets (requires ODDS_API_KEY)")
     args = parser.parse_args()
 
     print("=" * 60)
@@ -201,7 +204,21 @@ def main():
         if args.over35:  book_odds["over_3_5"] = args.over35
         if args.btts:    book_odds["btts"]     = args.btts
 
-    if args.backtest:
+    if args.live_odds:
+        upcoming = matches[matches["status"].isin(["SCHEDULED", "TIMED", "STATUS_SCHEDULED", "STATUS_TIMED"])]
+        predictions = []
+        for _, row in upcoming.iterrows():
+            try:
+                predictions.append(model.predict(row["home_team"], row["away_team"]))
+            except Exception:
+                pass
+        print("\nFetching live odds from The Odds API...")
+        try:
+            live_odds = fetch_live_odds()
+            print_value_analysis(predictions, live_odds)
+        except ValueError as e:
+            print(f"\n{e}")
+    elif args.backtest:
         backtest(matches, model)
     elif args.match:
         home, away = args.match
