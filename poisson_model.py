@@ -199,7 +199,7 @@ class DixonColesModel:
         result = minimize(
             _log_likelihood,
             x0,
-            args=(completed, self.teams, weights, elo_priors, 1.5),
+            args=(completed, self.teams, weights, elo_priors, 2.5),
             method="L-BFGS-B",
             options={"maxiter": 500},
         )

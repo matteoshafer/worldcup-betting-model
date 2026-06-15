@@ -68,7 +68,7 @@ ELO_RATINGS = {
     "Haiti":               1490,
     "Scotland":            1700,
     "Curaçao":             1500,
-    "Cape Verde":          1610,
+    "Cape Verde":          1550,
     "Georgia":             1670,
     "Slovenia":            1660,
     "Slovakia":            1660,
