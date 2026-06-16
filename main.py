@@ -18,13 +18,14 @@ from betting import find_value_bets, kelly_fraction, value_edge
 
 
 def _verdict(model_prob: float, book_odds: float) -> str:
-    """Return edge + Kelly stake verdict string for a market."""
+    """Return edge + quarter-Kelly stake verdict string for a market."""
     edge = value_edge(model_prob, book_odds)
     kelly = kelly_fraction(model_prob, book_odds)
+    qk = kelly * 0.25  # quarter-Kelly recommended stake
     if edge >= 0.04:
-        return f"  +{edge:.1%} edge  ✅ BET  ({kelly*100:.1f}% Kelly)"
+        return f"  +{edge:.1%} edge  ✅ BET  ({qk*100:.2f}% stake)"
     elif edge >= 0.02:
-        return f"  +{edge:.1%} edge  ⚠️  MARGINAL"
+        return f"  +{edge:.1%} edge  ⚠️  MARGINAL  ({qk*100:.2f}% stake)"
     else:
         return f"  {edge:+.1%} edge  ❌ No value"
 
@@ -127,7 +128,7 @@ def backtest(matches: pd.DataFrame, model: DixonColesModel) -> dict:
 
 def predict_upcoming(matches: pd.DataFrame, model: DixonColesModel):
     """Print predictions for all scheduled (not yet played) matches."""
-    upcoming = matches[matches["status"].isin(["SCHEDULED", "TIMED", "STATUS_SCHEDULED", "STATUS_TIMED"])].copy()
+    upcoming = matches[matches["status"].isin(["SCHEDULED", "TIMED", "STATUS_SCHEDULED", "STATUS_TIMED", "STATUS_IN_PROGRESS"])].copy()
     if upcoming.empty:
         print("No upcoming matches found.")
         return

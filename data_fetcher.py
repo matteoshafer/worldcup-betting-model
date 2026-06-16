@@ -376,11 +376,12 @@ def print_value_analysis(predictions: list[dict], live_odds: list[dict]):
             edge  = value_edge(model_p, book_o)
             kelly = kelly_fraction(model_p, book_o)
 
+            qk = kelly * 0.25
             if edge >= 0.04:
-                verdict = f"✅ BET  {kelly*100:.1f}% Kelly"
+                verdict = f"✅ BET  {qk*100:.2f}% stake"
                 found_value = True
             elif edge >= 0.02:
-                verdict = "⚠️  MARGINAL"
+                verdict = f"⚠️  MARGINAL  {qk*100:.2f}% stake"
             else:
                 verdict = "❌ No value"
 
